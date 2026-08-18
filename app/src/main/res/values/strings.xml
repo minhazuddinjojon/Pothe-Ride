@@ -1,0 +1,18 @@
+<resources>
+    <!--
+      In-app copy lives in core/i18n/Strings.kt, as a Kotlin interface with one
+      implementation per language: that makes a missing translation a compile error
+      and lets the user switch language without an activity restart. This file holds
+      only what the *system* renders outside the app.
+    -->
+    <string name="app_name">Pothe Ride</string>
+
+    <!-- The persistent notification a foreground location service is required to show.
+         Kept out of core/i18n/Strings.kt deliberately: system notification text must
+         resolve before Compose (and therefore LocalStrings) exists, since Android may
+         show it while the process is only just starting up after a restart. -->
+    <string name="tracking_notification_channel">Live location</string>
+    <string name="tracking_notification_title">Pothe Ride</string>
+    <string name="tracking_notification_body_starting">Starting live tracking…</string>
+    <string name="tracking_notification_body_active">Sharing your location with your passenger</string>
+</resources>

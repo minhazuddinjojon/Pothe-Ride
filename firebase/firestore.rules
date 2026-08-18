@@ -1,0 +1,422 @@
+rules_version = '2';
+
+// =====================================================================
+// Pothe Ride — Firestore security rules
+// =====================================================================
+//
+// Level 12. These replace the open placeholder that shipped with the
+// emulator scaffolding.
+//
+// Collection and field names here are taken verbatim from
+// `app/src/main/java/com/potheride/app/data/remote/FirestoreSchema.kt`.
+// If a name changes there it must change here, and vice versa; a rule
+// that guards a field nobody writes protects nothing at all, and fails
+// silently rather than loudly.
+//
+// Roles live in `users/{uid}.role` and are one of `passenger`, `driver`
+// or `admin` (see `FirestoreMappers.ROLE_*`). There are no custom auth
+// claims, so every role check costs a document read — see `isAdmin()`.
+//
+// Read `docs/upgrade/04_SECURITY.md` before changing anything here. It
+// records what these rules deliberately do *not* protect.
+// =====================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------
+
+    function signedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function isSelf(userId) {
+      return signedIn() && uid() == userId;
+    }
+
+    /**
+     * Reads the caller's own user document to find their role.
+     *
+     * This is a billed document read on every rule evaluation that calls
+     * it, which is why it is used sparingly and never on the hot paths
+     * (route search, live location). Rules-engine `get()` results are
+     * cached within a single request, so two calls in one rule cost one
+     * read, but a query returning 100 documents costs one lookup per
+     * document evaluated.
+     */
+    function roleOf(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)).data.role;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(uid()))
+        && roleOf(uid()) == 'admin';
+    }
+
+    /**
+     * True when `field` is not altered by this write.
+     *
+     * Expressed through `affectedKeys()` rather than comparing values,
+     * because that also catches the field being *removed*: a write that
+     * drops `role` entirely would otherwise slip past a naive equality
+     * check and leave the document with no role at all.
+     */
+    function unchanged(field) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([field]);
+    }
+
+    /** True when the write touches none of the listed fields. */
+    function allUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function ride(bookingId) {
+      return get(/databases/$(database)/documents/rideRequests/$(bookingId)).data;
+    }
+
+    function isRideParticipant(bookingId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/rideRequests/$(bookingId))
+        && (ride(bookingId).passengerId == uid() || ride(bookingId).driverId == uid());
+    }
+
+    // ---------------------------------------------------------------
+    // users/{userId}
+    // ---------------------------------------------------------------
+    //
+    // The privilege-escalation guard. `role` is read by nearly every
+    // other rule in this file, so if a user can write their own role
+    // they can grant themselves `admin` and the rest of the file is
+    // decoration. It is therefore immutable from the client on every
+    // path: not settable to `admin` at creation, and not changeable at
+    // all on update. Promoting an admin is a deliberate out-of-band act
+    // (console or Admin SDK), which is the correct amount of friction.
+    //
+    // `blocked` is likewise moderation state and not self-serve.
+
+    match /users/{userId} {
+
+      allow get: if isSelf(userId) || isAdmin();
+      // No `list`: a listable users collection is a phone-number dump.
+      allow list: if isAdmin();
+
+      allow create: if isSelf(userId)
+        && request.resource.data.role in ['passenger', 'driver']
+        && request.resource.data.blocked == false;
+
+      allow update: if (isSelf(userId) && selfRoleUnchanged() && unchanged('blocked'))
+        || isAdmin();
+
+      // Deleting a user orphans their rides, payments and safety
+      // reports. Account removal is an operational task, not a tap.
+      allow delete: if false;
+
+      // Private per-user data. Not even an admin reads these: a saved
+      // home address and a next-of-kin phone number are exactly the
+      // fields a compromised admin account is worth compromising for.
+      match /savedPlaces/{placeId} {
+        allow read, write: if isSelf(userId);
+      }
+      match /trustedContacts/{contactId} {
+        allow read, write: if isSelf(userId);
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // drivers/{driverId}
+    // ---------------------------------------------------------------
+    //
+    // Ownership is `userId`, not the document id: `DriverProfileEntity`
+    // carries `id` and `userId` as separate columns, so the profile id
+    // is not guaranteed to equal the uid.
+    //
+    // Readable by any signed-in user because a passenger choosing a
+    // ride must see the driver's rating, trip count and vehicle. Note
+    // that this makes the driver's licence number visible to every
+    // signed-in account — see the limitations section of 04_SECURITY.md.
+
+    match /drivers/{driverId} {
+
+      function isOwner() {
+        return signedIn() && resource.data.userId == uid();
+      }
+
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.userId == uid()
+        // A driver cannot self-certify. `verified` gates who may carry
+        // passengers, so it is admin-only on both create and update.
+        && request.resource.data.verified == false;
+
+      allow update: if (isOwner() && unchanged('verified') && unchanged('userId'))
+        || isAdmin();
+
+      allow delete: if isAdmin();
+
+      // Identity documents: NID, licence, registration, face capture.
+      // The file bytes live in Storage (see storage.rules); this holds
+      // the metadata and the approval status.
+      match /documents/{docId} {
+
+        function ownsDriver() {
+          return signedIn()
+            && get(/databases/$(database)/documents/drivers/$(driverId)).data.userId == uid();
+        }
+
+        allow read: if ownsDriver() || isAdmin();
+        allow create: if ownsDriver()
+          && request.resource.data.get('status', 'PENDING') != 'APPROVED';
+
+        // The driver may replace a rejected or pending document, but
+        // may not move it to APPROVED. Only an admin may do that, and
+        // once approved the driver may not silently swap the file
+        // underneath an approval.
+        allow update: if isAdmin()
+          || (ownsDriver()
+              && resource.data.get('status', 'PENDING') != 'APPROVED'
+              && request.resource.data.get('status', 'PENDING') != 'APPROVED');
+
+        allow delete: if isAdmin()
+          || (ownsDriver() && resource.data.get('status', 'PENDING') != 'APPROVED');
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // routes/{routeId}
+    // ---------------------------------------------------------------
+    //
+    // A published trip. Public to signed-in users by necessity: search
+    // is a client-side query across other people's routes.
+    //
+    // The awkward case is `availableSeats`. Seat claims run in a
+    // client-side Firestore transaction from the *passenger's* device
+    // (`data/remote/SeatAccounting.kt`), so a passenger must be able to
+    // write one field of a document they do not own. The rule narrows
+    // that to exactly that field, within sane bounds. It is still the
+    // weakest rule in this file — see 04_SECURITY.md.
+
+    match /routes/{routeId} {
+
+      function isOwningDriver() {
+        return signedIn() && resource.data.driverId == uid();
+      }
+
+      function onlySeatCountChanged() {
+        return request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['availableSeats'])
+          && request.resource.data.availableSeats is int
+          && request.resource.data.availableSeats >= 0
+          && request.resource.data.availableSeats <= resource.data.totalSeats;
+      }
+
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.driverId == uid()
+        && request.resource.data.availableSeats <= request.resource.data.totalSeats;
+
+      allow update: if isOwningDriver()
+        || isAdmin()
+        || (signedIn() && onlySeatCountChanged());
+
+      // Cancelling a trip is a status update, not a delete: passengers
+      // holding a booking against it need the row to still exist.
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // rideRequests/{bookingId}
+    // ---------------------------------------------------------------
+    //
+    // `driverId` is denormalised onto the request precisely so this rule
+    // (and the driver's inbox query) can be answered from the document
+    // itself, with no join. Firestore has no joins and rules cannot run
+    // queries, so a rule that needed the parent route would cost a
+    // `get()` per document on every list.
+    //
+    // The money fields are frozen after creation. They are computed by
+    // `core/pricing/FareCalculator`, and a client that can edit
+    // `totalPoisha` on an accepted booking can ride for free.
+
+    match /rideRequests/{bookingId} {
+
+      function isPassenger() {
+        return signedIn() && resource.data.passengerId == uid();
+      }
+
+      function isDriver() {
+        return signedIn() && resource.data.driverId == uid();
+      }
+
+      function immutablesUntouched() {
+        return allUnchanged([
+          'tripId', 'passengerId', 'driverId',
+          'farePoisha', 'totalPoisha', 'seatsRequested', 'requestedAt'
+        ]);
+      }
+
+      // A passenger reads only their own requests; a driver reads only
+      // requests addressed to them. Both `get` and `list` are covered:
+      // on a query, the rule is evaluated per candidate document, so a
+      // query without the matching `where` clause fails rather than
+      // returning a filtered subset.
+      allow read: if isPassenger() || isDriver() || isAdmin();
+
+      allow create: if signedIn()
+        && request.resource.data.passengerId == uid()
+        && request.resource.data.driverId is string
+        && request.resource.data.driverId != uid()
+        && request.resource.data.status == 'REQUESTED';
+
+      allow update: if (isPassenger() || isDriver()) && immutablesUntouched();
+
+      // History is evidence — for the fare dispute, the rating and the
+      // safety report. Cancellation is a status, not a deletion.
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isRideParticipant(bookingId);
+        allow create: if isRideParticipant(bookingId)
+          && request.resource.data.senderId == uid();
+        // Only `readAt` may change, and nobody may rewrite what was said.
+        allow update: if isRideParticipant(bookingId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAt']);
+        allow delete: if false;
+      }
+
+      match /ratings/{ratingId} {
+        allow read: if signedIn();
+        allow create: if isRideParticipant(bookingId)
+          && request.resource.data.raterId == uid()
+          && request.resource.data.rateeId != uid()
+          && request.resource.data.stars is int
+          && request.resource.data.stars >= 1
+          && request.resource.data.stars <= 5;
+        // A rating that can be edited after the fact is a bargaining
+        // chip at the roadside.
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // payments/{paymentId}
+    // ---------------------------------------------------------------
+    //
+    // Readable by the two parties to the ride, writable by neither.
+    // The passenger is not a field on the payment document — it carries
+    // `bookingId` and `driverId` — so the passenger check costs a
+    // `get()` on the ride request.
+    //
+    // All writes are refused. Payments are created and settled through
+    // the Admin SDK (a Cloud Function or the operator console), which
+    // bypasses these rules entirely. The platform fee and the driver's
+    // earnings split must not be computable by the party who benefits
+    // from getting it wrong.
+
+    match /payments/{paymentId} {
+      allow get: if isAdmin()
+        || (signedIn() && resource.data.driverId == uid())
+        || (signedIn() && isRideParticipant(resource.data.bookingId));
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // notifications/{notificationId}
+    // ---------------------------------------------------------------
+    //
+    // Addressed to exactly one user. A sender may only create one that
+    // is either for themselves or for their counterparty on a ride they
+    // are actually part of — otherwise any account could push arbitrary
+    // text into any other user's notification tray, which is a phishing
+    // channel with the app's own branding on it.
+
+    match /notifications/{notificationId} {
+      allow read: if signedIn() && resource.data.userId == uid();
+
+      allow create: if signedIn()
+        && (request.resource.data.userId == uid()
+            || (request.resource.data.bookingId is string
+                && isRideParticipant(request.resource.data.bookingId)
+                && request.resource.data.userId != uid()));
+
+      // The recipient may only mark it read.
+      allow update: if signedIn()
+        && resource.data.userId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAt']);
+
+      allow delete: if signedIn() && resource.data.userId == uid();
+    }
+
+    // ---------------------------------------------------------------
+    // liveLocations/{tripId}
+    // ---------------------------------------------------------------
+    //
+    // Written every few seconds by the driver's device while a trip is
+    // running. Only the driver who owns the route may write it, checked
+    // against the route document rather than trusting the `driverId`
+    // field in the incoming payload — otherwise anyone could publish a
+    // fake position for someone else's trip and steer a passenger to
+    // the wrong pickup point.
+
+    match /liveLocations/{tripId} {
+
+      function ownsTrip() {
+        return signedIn()
+          && exists(/databases/$(database)/documents/routes/$(tripId))
+          && get(/databases/$(database)/documents/routes/$(tripId)).data.driverId == uid();
+      }
+
+      // Read is open to any signed-in user. See 04_SECURITY.md — this
+      // is a known, deliberate weakening, and it is not free.
+      allow read: if signedIn();
+
+      allow create, update: if ownsTrip()
+        && request.resource.data.driverId == uid()
+        && request.resource.data.tripId == tripId;
+
+      allow delete: if ownsTrip() || isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // safetyEvents/{eventId}
+    // ---------------------------------------------------------------
+    //
+    // SOS presses and abuse reports. Top-level rather than nested under
+    // a user because an admin reads across all of them.
+
+    match /safetyEvents/{eventId} {
+      allow get: if isAdmin() || (signedIn() && resource.data.raisedByUserId == uid());
+      allow list: if isAdmin();
+
+      allow create: if signedIn()
+        && request.resource.data.raisedByUserId == uid()
+        && request.resource.data.resolved == false;
+
+      // Only an admin closes a report. A user who could mark their own
+      // case resolved could bury a complaint made against them.
+      allow update, delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // Deny by default
+    // ---------------------------------------------------------------
+    //
+    // Firestore already denies anything unmatched, but stating it makes
+    // the intent explicit: a collection added to the app without a rule
+    // added here is inaccessible, and that failure is loud in testing
+    // rather than quiet in production.
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

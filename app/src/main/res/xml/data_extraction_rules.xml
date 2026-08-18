@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Ride history, phone numbers and trusted contacts are excluded from cloud backup
+  and device-to-device transfer. Until there is a server holding this data under a
+  real privacy policy, the safest place for it is the device it was created on.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="database" path="pothe_ride.db" />
+        <exclude domain="sharedpref" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="database" path="pothe_ride.db" />
+    </device-transfer>
+</data-extraction-rules>

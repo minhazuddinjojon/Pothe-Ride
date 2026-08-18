@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Live driver tracking. Coarse is listed alongside fine so a user who grants
+         only approximate location still gets a working, if less precise, product. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+    <!-- Not requested: ACCESS_BACKGROUND_LOCATION. The tracking service only needs to
+         survive the app being minimised, which foregroundServiceType="location" already
+         covers; requesting background access on top of that is an unnecessary Play Store
+         review flag for a permission the app does not use. -->
+
+    <!-- Masked calling opens the dialer rather than placing the call directly, so
+         CALL_PHONE is not requested. Play Store review treats that permission as
+         sensitive and it buys nothing here. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+        </intent>
+    </queries>
+
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false" />
+
+    <application
+        android:name=".PotheRideApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PotheRide">
+
+        <!--
+          Google Maps is not wired up in this build; the app draws routes on its own
+          coordinate-accurate canvas so it runs with no API key. When you switch to
+          the Maps SDK, add the key here and see docs/MAPS.md:
+          <meta-data android:name="com.google.android.geo.API_KEY" android:value="${MAPS_API_KEY}" />
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.PotheRide"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Publishes the driver's live position while a trip is under way. See
+             LocationForegroundService's KDoc for why this needs foreground, not a
+             background job: WorkManager and passive location updates are both throttled
+             once the app leaves the foreground, which is exactly the accuracy this
+             feature needs. -->
+        <service
+            android:name=".location.LocationForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+    </application>
+</manifest>

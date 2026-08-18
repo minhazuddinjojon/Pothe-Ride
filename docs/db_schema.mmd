@@ -1,0 +1,102 @@
+erDiagram
+    USERS ||--o| DRIVER_PROFILES : "may become"
+    USERS ||--o{ SAVED_PLACES : saves
+    USERS ||--o{ TRUSTED_CONTACTS : trusts
+    USERS ||--o{ NOTIFICATIONS : receives
+    USERS ||--o{ BOOKINGS : requests
+    USERS ||--o{ SAFETY_EVENTS : raises
+    DRIVER_PROFILES ||--o{ VEHICLES : owns
+    DRIVER_PROFILES ||--o{ TRIPS : publishes
+    VEHICLES ||--o{ TRIPS : "used for"
+    TRIPS ||--o{ ROUTE_WAYPOINTS : "described by"
+    TRIPS ||--o{ BOOKINGS : receives
+    BOOKINGS ||--o| PAYMENTS : settles
+    BOOKINGS ||--o{ RATINGS : produces
+    BOOKINGS ||--o{ MESSAGES : contains
+
+    USERS {
+        string id PK
+        string phone UK
+        string name
+        string language
+        bool otpVerified
+        bool blocked
+    }
+    DRIVER_PROFILES {
+        string id PK
+        string userId FK
+        string licenseNumber
+        bool verified
+        int ratingSum
+        int ratingCount
+        int totalTrips
+    }
+    VEHICLES {
+        string id PK
+        string driverId FK
+        string type
+        string plateNumber UK
+        int capacity
+    }
+    TRIPS {
+        string id PK
+        string driverId FK
+        string vehicleId FK
+        double startLat
+        double startLng
+        double endLat
+        double endLng
+        long departureTime
+        int totalSeats
+        int availableSeats
+        double detourKm
+        double currentLat
+        double currentLng
+        double travelledKm
+        string status
+    }
+    ROUTE_WAYPOINTS {
+        string id PK
+        string tripId FK
+        int seq
+        double lat
+        double lng
+    }
+    BOOKINGS {
+        string id PK
+        string tripId FK
+        string passengerId FK
+        double pickupLat
+        double pickupLng
+        double dropLat
+        double dropLng
+        int seatsRequested
+        float routeOverlapRatio
+        double sharedDistanceKm
+        long farePoisha
+        long totalPoisha
+        string status
+    }
+    PAYMENTS {
+        string id PK
+        string bookingId FK
+        string driverId
+        long amountPoisha
+        long platformFeePoisha
+        long driverEarningsPoisha
+        string method
+        string status
+    }
+    RATINGS {
+        string id PK
+        string bookingId FK
+        string raterId
+        string rateeId
+        int stars
+    }
+    MESSAGES {
+        string id PK
+        string bookingId FK
+        string senderId
+        string content
+    }

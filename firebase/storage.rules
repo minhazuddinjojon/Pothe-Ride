@@ -1,0 +1,77 @@
+rules_version = '2';
+
+// =====================================================================
+// Pothe Ride — Firebase Storage security rules
+// =====================================================================
+//
+// Level 12. Paths are taken verbatim from
+// `app/src/main/java/com/potheride/app/data/remote/FirestoreSchema.kt`'s
+// `Storage` object:
+//   drivers/{uid}/documents/{kind}.{ext}   — NID, licence, registration
+//   users/{uid}/profile.{ext}              — profile photo
+//   users/{uid}/face/{timestamp}.{ext}     — face verification captures
+//
+// If a path there changes, it must change here too.
+//
+// Firestore's rules (firestore.rules) are the authority on *who is a
+// driver* and *what their role is* — Storage rules cannot cheaply read
+// role information the way Firestore rules can join across collections,
+// so these rules deliberately stay simple: a user may write only their
+// own uid's folder, and identity documents are never world-readable.
+// See docs/upgrade/04_SECURITY.md for what this does not protect.
+// =====================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    // Identity documents and vehicle registration must never be readable
+    // by anyone but the driver who owns them and a signed-in admin
+    // reviewer. There is no cheap way to check "is admin" here without a
+    // Firestore read from Storage rules, so review happens through the
+    // Firebase console / an admin SDK job rather than a direct client
+    // read of another user's folder — the app's AdminScreen must fetch
+    // documents through a server-side path (a Cloud Function or the
+    // Admin SDK), never a raw client `getDownloadUrl()` on someone
+    // else's uid.
+    match /drivers/{driverId}/documents/{fileName} {
+      allow read: if isOwner(driverId);
+      allow write: if isOwner(driverId)
+        && request.resource.size < 8 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if false; // Review history must not be erasable by the driver.
+    }
+
+    // Profile photos are shown to other users (a driver's card, a
+    // passenger's booking history), so these ARE readable by anyone
+    // signed in — unlike the identity documents above.
+    match /users/{userId}/profile.{extension} {
+      allow read: if signedIn();
+      allow write: if isOwner(userId)
+        && request.resource.size < 4 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Face verification captures are as sensitive as the identity
+    // documents above — never readable by anyone but the owner.
+    match /users/{userId}/face/{fileName} {
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId)
+        && request.resource.size < 4 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if false;
+    }
+
+    // Deny everything else by default.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

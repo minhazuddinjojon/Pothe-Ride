@@ -1,0 +1,25 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+# Not just /build: the module's own output directory is app/build, and leaving it
+# untracked-but-not-ignored makes `git add -A` walk tens of thousands of intermediates
+# plus a 59 MB APK.
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Release signing material must never be committed.
+keystore.properties
+*.jks
+*.keystore
+
+# Firebase emulator run logs — local noise, not source.
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+.firebase/
